@@ -2,7 +2,7 @@
 // PUTER AI SERVICE - Gemini Integration
 // ========================================
 
-import { STRATEGY_KNOWLEDGE } from '@/data/strategyKnowledge';
+import { STRATEGY_KNOWLEDGE, HERO_SYNERGIES, TALENT_PRIORITIES, EQUIPMENT_PRIORITY, CIVILIZATION_TIPS } from '@/data/strategyKnowledge';
 import { getHeroes, getEquipment, getBuildings, getPlayerProfile, getSettings } from './storage';
 import type { Hero, EquipmentItem, Building, OCRResult, AIModelId } from '@/types/game';
 
@@ -13,16 +13,17 @@ declare global {
         authenticateWithPuter: () => Promise<void>;
       };
       auth: {
-        isSignedIn: () => Promise<boolean>;
+        isSignedIn: () => boolean;
         getUser: () => Promise<{ username: string } | null>;
         signOut: () => Promise<void>;
+        signIn: () => Promise<void>;
       };
       ai: {
         chat: (
           prompt: string | any[],
-          imageUrlOrOptions?: string | { model?: string },
-          options?: { model?: string }
-        ) => Promise<string>;
+          imageUrlOrOptions?: string | { model?: string; stream?: boolean },
+          options?: { model?: string; stream?: boolean }
+        ) => Promise<string | { message?: { content: string }; text?: string }>;
       };
       fs: {
         write: (path: string, content: Blob) => Promise<{ path: string }>;
@@ -37,10 +38,10 @@ export function isPuterAvailable(): boolean {
 }
 
 // Check if user is signed in
-export async function isPuterSignedIn(): Promise<boolean> {
+export function isPuterSignedIn(): boolean {
   if (!isPuterAvailable()) return false;
   try {
-    return await window.puter.auth.isSignedIn();
+    return window.puter.auth.isSignedIn();
   } catch {
     return false;
   }
@@ -64,8 +65,8 @@ export async function authenticatePuter(): Promise<boolean> {
     return false;
   }
   try {
-    await window.puter.ui.authenticateWithPuter();
-    return await isPuterSignedIn();
+    await window.puter.auth.signIn();
+    return isPuterSignedIn();
   } catch (error) {
     console.error('Puter auth error:', error);
     return false;
@@ -145,9 +146,14 @@ RESSOURCES:
   return context;
 }
 
-// System prompt for AI
-function getSystemPrompt(context: 'general' | 'ocr' | 'hero' | 'equipment' | 'building' | 'team'): string {
-  const basePrompt = `Tu es l'Oracle Stratégique, un Grand Stratège militaire vétéran d'Age of Empires Mobile.
+// Context types for AI prompts
+export type AIContext = 'general' | 'ocr' | 'hero' | 'equipment' | 'building' | 'team';
+
+// System prompts object for display in settings
+export const SYSTEM_PROMPTS: Record<AIContext, { name: string; template: string }> = {
+  general: {
+    name: 'Oracle Général',
+    template: `Tu es l'Oracle Stratégique, un Grand Stratège militaire vétéran d'Age of Empires Mobile.
 
 RÈGLES STRICTES:
 1. Tu dois UNIQUEMENT utiliser les informations du document stratégique fourni pour tes explications théoriques. N'invente rien.
@@ -156,14 +162,13 @@ RÈGLES STRICTES:
 4. Tu proposes des ACTIONS CONCRÈTES basées sur ce que l'utilisateur possède réellement.
 5. Si l'utilisateur n'a pas les ressources nécessaires, tu proposes des alternatives avec ce qu'il a.
 
-DOCUMENT STRATÉGIQUE:
-${STRATEGY_KNOWLEDGE}
-
-${buildUserContext()}`;
-
-  const contextPrompts = {
-    general: basePrompt,
-    ocr: `${basePrompt}
+VARIABLES DISPONIBLES:
+- {{STRATEGY_KNOWLEDGE}} : Document stratégique complet
+- {{USER_CONTEXT}} : Données du joueur (héros, équipement, bâtiments)`,
+  },
+  ocr: {
+    name: 'Analyse OCR/Image',
+    template: `Tu es l'Oracle Stratégique, expert en analyse d'images du jeu Age of Empires Mobile.
 
 TÂCHE SPÉCIALE - OCR/ANALYSE D'IMAGE:
 Tu dois analyser la capture d'écran fournie et extraire TOUTES les informations visibles:
@@ -172,55 +177,150 @@ Tu dois analyser la capture d'écran fournie et extraire TOUTES les informations
 - Pour un bâtiment: nom, niveau, coûts upgrade, temps, production si applicable
 - Pour l'inventaire: liste COMPLÈTE de tous les items visibles
 
-IMPORTANT: Si tu détectes que l'image ne montre pas TOUS les éléments (ex: inventaire tronqué), indique quels éléments manquent et demande des captures supplémentaires.
+IMPORTANT: Si tu détectes que l'image ne montre pas TOUS les éléments (ex: inventaire tronqué), 
+indique "complete": false et liste les "missingElements".
 
-Réponds en JSON structuré avec le format approprié.`,
-    hero: `${basePrompt}
+VARIABLES DISPONIBLES:
+- {{STRATEGY_KNOWLEDGE}} : Document stratégique pour validation
+- {{USER_CONTEXT}} : Données actuelles du joueur
 
-FOCUS HÉROS:
-Analyse et conseille sur les héros. Vérifie:
-- Configuration des talents (correct ou à réinitialiser?)
-- Équipement optimal (as-t-il le meilleur disponible?)
-- Synergies avec d'autres héros possédés
-- Priorités d'investissement`,
-    equipment: `${basePrompt}
+RÉPONDS EN JSON STRUCTURÉ avec ce format exact:
+{
+  "type": "hero|equipment|building|profile|inventory",
+  "confidence": 0.0-1.0,
+  "data": { /* données extraites selon le type */ },
+  "complete": true|false,
+  "missingElements": ["liste des éléments non visibles si incomplet"]
+}`,
+  },
+  hero: {
+    name: 'Conseiller Héros',
+    template: `Tu es l'Oracle Stratégique, expert en optimisation de héros d'Age of Empires Mobile.
 
-FOCUS ÉQUIPEMENT:
-Analyse l'équipement. Applique les règles:
-- Épique 3★ > Légendaire 0★
-- Vérifie les gemmes par rôle
-- Propose des échanges optimaux entre héros`,
-    building: `${basePrompt}
+FOCUS HÉROS - Tu dois:
+1. Vérifier la configuration des talents (correct ou à réinitialiser?)
+2. Analyser l'équipement optimal (a-t-il le meilleur disponible?)
+3. Identifier les synergies avec d'autres héros possédés
+4. Établir les priorités d'investissement
 
-FOCUS BÂTIMENTS:
-Analyse les bâtiments. Indique:
-- Priorités d'upgrade
+VARIABLES DISPONIBLES:
+- {{STRATEGY_KNOWLEDGE}} : Stratégies et méta du jeu
+- {{HERO_SYNERGIES}} : Synergies de héros documentées
+- {{TALENT_PRIORITIES}} : Priorités de talents par rôle
+- {{USER_CONTEXT}} : Héros et équipement du joueur`,
+  },
+  equipment: {
+    name: 'Expert Équipement',
+    template: `Tu es l'Oracle Stratégique, expert en équipement d'Age of Empires Mobile.
+
+FOCUS ÉQUIPEMENT - Applique les règles:
+- Épique 3★ > Légendaire 0★ TOUJOURS
+- Vérifie les gemmes par rôle (Rouge/Jaune/Bleu)
+- Propose des échanges optimaux entre héros
+- Utilise la stratégie du "Pont Épique"
+
+VARIABLES DISPONIBLES:
+- {{STRATEGY_KNOWLEDGE}} : Règles d'équipement
+- {{EQUIPMENT_PRIORITY}} : Gemmes recommandées par rôle
+- {{USER_CONTEXT}} : Équipement actuel du joueur`,
+  },
+  building: {
+    name: 'Architecte Bâtiments',
+    template: `Tu es l'Oracle Stratégique, expert en construction d'Age of Empires Mobile.
+
+FOCUS BÂTIMENTS - Tu dois analyser:
+- Priorités d'upgrade (quel bâtiment améliorer en premier)
 - Coûts et temps estimés
-- Production actuelle vs potentielle`,
-    team: `${basePrompt}
+- Production actuelle vs potentielle
+- ROI de chaque amélioration
 
-FOCUS ÉQUIPES/SYNERGIES:
-Crée des compositions optimales selon les règles:
-- NE JAMAIS mélanger types d'unités
-- 1 Maréchal + DPS/Tacticiens
-- Vérifie les synergies documentées`,
-  };
+VARIABLES DISPONIBLES:
+- {{STRATEGY_KNOWLEDGE}} : Conseils de construction
+- {{CIVILIZATION_TIPS}} : Bonus de civilisation
+- {{USER_CONTEXT}} : Bâtiments et ressources du joueur`,
+  },
+  team: {
+    name: 'Stratège Équipes',
+    template: `Tu es l'Oracle Stratégique, expert en composition d'équipes d'Age of Empires Mobile.
+
+FOCUS ÉQUIPES/SYNERGIES - Règles absolues:
+- NE JAMAIS mélanger types d'unités (Cavalerie/Archers/Épéistes/Piquiers)
+- 1 Maréchal (Leader) + DPS/Tacticiens
+- Vérifie les synergies documentées avant de proposer
+
+VARIABLES DISPONIBLES:
+- {{STRATEGY_KNOWLEDGE}} : Meta et synergies
+- {{HERO_SYNERGIES}} : Compositions recommandées
+- {{USER_CONTEXT}} : Héros disponibles du joueur`,
+  },
+};
+
+// Generate the actual system prompt with data
+export function getSystemPrompt(context: AIContext): string {
+  const basePrompt = SYSTEM_PROMPTS[context].template
+    .replace('{{STRATEGY_KNOWLEDGE}}', STRATEGY_KNOWLEDGE)
+    .replace('{{USER_CONTEXT}}', buildUserContext())
+    .replace('{{HERO_SYNERGIES}}', JSON.stringify(HERO_SYNERGIES, null, 2))
+    .replace('{{TALENT_PRIORITIES}}', JSON.stringify(TALENT_PRIORITIES, null, 2))
+    .replace('{{EQUIPMENT_PRIORITY}}', JSON.stringify(EQUIPMENT_PRIORITY, null, 2))
+    .replace('{{CIVILIZATION_TIPS}}', JSON.stringify(CIVILIZATION_TIPS, null, 2));
   
-  return contextPrompts[context];
+  return basePrompt;
+}
+
+// Get all strategy knowledge for display
+export function getStrategyCodex(): { title: string; content: string }[] {
+  return [
+    { title: 'Civilisations & Bonus', content: extractSection(STRATEGY_KNOWLEDGE, '## 1. CIVILISATIONS', '## 2.') },
+    { title: 'Système de Héros', content: extractSection(STRATEGY_KNOWLEDGE, '## 2. SYSTÈME', '## 3.') },
+    { title: 'Système d\'Équipement', content: extractSection(STRATEGY_KNOWLEDGE, '## 3. SYSTÈME', '## 4.') },
+    { title: 'Formules de Combat', content: extractSection(STRATEGY_KNOWLEDGE, '## 4. FORMULES', '## 5.') },
+    { title: 'Modes de Jeu', content: extractSection(STRATEGY_KNOWLEDGE, '## 5. MODES', '## 6.') },
+    { title: 'Synergies Héros', content: extractSection(STRATEGY_KNOWLEDGE, '## 6. SYNERGIES', '## 7.') },
+    { title: 'Optimisations', content: extractSection(STRATEGY_KNOWLEDGE, '## 7. OPTIMISATIONS', '## 8.') },
+    { title: 'Règles d\'Or de l\'IA', content: extractSection(STRATEGY_KNOWLEDGE, '## 8. RÈGLES', 'END') },
+  ];
+}
+
+function extractSection(text: string, start: string, end: string): string {
+  const startIdx = text.indexOf(start);
+  if (startIdx === -1) return '';
+  
+  const endIdx = end === 'END' ? text.length : text.indexOf(end, startIdx);
+  if (endIdx === -1) return text.slice(startIdx);
+  
+  return text.slice(startIdx, endIdx).trim();
+}
+
+// Helper to extract response content from Puter AI
+function extractResponseContent(response: any): string {
+  if (typeof response === 'string') {
+    return response;
+  }
+  if (response?.message?.content) {
+    return response.message.content;
+  }
+  if (response?.text) {
+    return response.text;
+  }
+  if (response?.content) {
+    return response.content;
+  }
+  return JSON.stringify(response);
 }
 
 // Main AI chat function
 export async function chatWithAI(
   message: string,
   imageBase64?: string,
-  context: 'general' | 'ocr' | 'hero' | 'equipment' | 'building' | 'team' = 'general',
+  context: AIContext = 'general',
   model?: AIModelId
 ): Promise<string> {
   if (!isPuterAvailable()) {
-    throw new Error('Puter SDK non disponible. Veuillez vous connecter à Puter.');
+    throw new Error('Puter SDK non disponible. Veuillez recharger la page.');
   }
   
-  const isSignedIn = await isPuterSignedIn();
+  const isSignedIn = isPuterSignedIn();
   if (!isSignedIn) {
     throw new Error('Veuillez vous connecter à Puter pour utiliser l\'IA.');
   }
@@ -229,25 +329,31 @@ export async function chatWithAI(
   const selectedModel = model || settings.ai.defaultModel || 'gemini-2.0-flash';
   const systemPrompt = getSystemPrompt(context);
   
+  console.log('ChatWithAI:', { message: message.slice(0, 50), hasImage: !!imageBase64, model: selectedModel, context });
+  
   try {
-    let response: string;
+    let response: any;
+    const fullPrompt = `${systemPrompt}\n\n---\nUtilisateur: ${message}`;
     
     if (imageBase64) {
-      // Vision request with image
+      // Vision request with image - pass as second parameter
+      console.log('Sending vision request with image...');
       response = await window.puter.ai.chat(
-        `${systemPrompt}\n\nUtilisateur: ${message}`,
+        fullPrompt,
         imageBase64,
         { model: selectedModel }
       );
     } else {
       // Text-only request
+      console.log('Sending text request...');
       response = await window.puter.ai.chat(
-        `${systemPrompt}\n\nUtilisateur: ${message}`,
+        fullPrompt,
         { model: selectedModel }
       );
     }
     
-    return response;
+    console.log('AI Response received:', typeof response, response);
+    return extractResponseContent(response);
   } catch (error) {
     console.error('AI chat error:', error);
     throw new Error(`Erreur IA: ${error instanceof Error ? error.message : 'Erreur inconnue'}`);
@@ -258,7 +364,7 @@ export async function chatWithAI(
 export async function chatWithMultipleModels(
   message: string,
   imageBase64?: string,
-  context: 'general' | 'ocr' | 'hero' | 'equipment' | 'building' | 'team' = 'general'
+  context: AIContext = 'general'
 ): Promise<{ model: string; response: string }[]> {
   const settings = getSettings();
   
@@ -267,8 +373,11 @@ export async function chatWithMultipleModels(
     return [{ model: settings.ai.defaultModel, response }];
   }
   
+  const modelsToUse = settings.ai.selectedModels.slice(0, settings.ai.modelCount);
+  console.log('Multi-model request with:', modelsToUse);
+  
   const results = await Promise.allSettled(
-    settings.ai.selectedModels.slice(0, settings.ai.modelCount).map(async (model) => {
+    modelsToUse.map(async (model) => {
       const response = await chatWithAI(message, imageBase64, context, model as AIModelId);
       return { model, response };
     })
@@ -285,43 +394,44 @@ export async function analyzeScreenshot(
   expectedType: 'hero' | 'equipment' | 'building' | 'profile' | 'inventory' | 'auto'
 ): Promise<OCRResult> {
   const prompt = expectedType === 'auto'
-    ? `Analyse cette capture d'écran d'Age of Empires Mobile. Détermine le type de contenu (héros, équipement, bâtiment, profil, inventaire) et extrais TOUTES les informations visibles. Réponds en JSON avec la structure:
-{
-  "type": "hero|equipment|building|profile|inventory",
-  "confidence": 0.0-1.0,
-  "data": { /* données extraites selon le type */ },
-  "complete": true|false,
-  "missingElements": ["liste des éléments non visibles si incomplet"]
-}`
-    : `Analyse cette capture d'écran d'Age of Empires Mobile contenant un ${expectedType}. Extrais TOUTES les informations visibles. Réponds en JSON structuré.`;
+    ? `Analyse cette capture d'écran d'Age of Empires Mobile. Détermine le type de contenu (héros, équipement, bâtiment, profil, inventaire) et extrais TOUTES les informations visibles en détail.`
+    : `Analyse cette capture d'écran d'Age of Empires Mobile contenant un ${expectedType}. Extrais TOUTES les informations visibles en détail.`;
+
+  console.log('Analyzing screenshot:', { expectedType, imageLength: imageBase64.length });
 
   try {
     const response = await chatWithAI(prompt, imageBase64, 'ocr');
+    console.log('OCR Response:', response);
     
     // Try to parse JSON from response
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        success: true,
-        type: parsed.type || expectedType,
-        data: parsed.data || parsed,
-        confidence: parsed.confidence || 0.8,
-        rawText: response,
-        needsMoreScreenshots: parsed.complete === false,
-        missingElements: parsed.missingElements,
-      };
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          success: true,
+          type: parsed.type || expectedType,
+          data: parsed.data || parsed,
+          confidence: parsed.confidence || 0.8,
+          rawText: response,
+          needsMoreScreenshots: parsed.complete === false,
+          missingElements: parsed.missingElements,
+        };
+      } catch (parseError) {
+        console.error('JSON parse error:', parseError);
+      }
     }
     
-    // If no JSON, return raw text
+    // If no JSON, return raw text with basic analysis
     return {
       success: true,
       type: expectedType === 'auto' ? 'unknown' : expectedType,
       data: { rawResponse: response },
-      confidence: 0.5,
+      confidence: 0.6,
       rawText: response,
     };
   } catch (error) {
+    console.error('OCR error:', error);
     return {
       success: false,
       type: 'unknown',
