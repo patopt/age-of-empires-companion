@@ -8,6 +8,7 @@ import BuildingsSection from '@/components/sections/BuildingsSection';
 import OracleChat from '@/components/sections/OracleChat';
 import SettingsSection from '@/components/sections/SettingsSection';
 import UniversalScanner from '@/components/sections/UniversalScanner';
+import PuterAccountSelector from '@/components/PuterAccountSelector';
 import { isPuterAvailable, isPuterSignedIn, getPuterUser, authenticatePuter } from '@/services/puterAI';
 import { getSettings, updateSettings } from '@/services/storage';
 
@@ -85,6 +86,11 @@ const Index = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {puterConnected && (
+              <PuterAccountSelector
+                onAddAccount={() => setActiveSection('settings')}
+              />
+            )}
             <button
               onClick={() => setActiveSection('scanner')}
               className="p-2 rounded-lg bg-primary/20 text-primary hover:bg-primary/30 transition-colors"
