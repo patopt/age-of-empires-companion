@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, LogOut, Variable, Check, ChevronRight, BookOpen, Code, Sparkles, ChevronDown, ExternalLink, Trash2, Plus, Zap } from 'lucide-react';
+import { Settings, LogOut, Variable, Check, ChevronRight, BookOpen, Code, Sparkles, ChevronDown, ExternalLink, Trash2, Plus, Zap, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
@@ -17,8 +17,10 @@ import {
   addPuterAccount,
   deletePuterAccount,
   getAccountInfo,
+  refreshAccountInfo,
   formatTokens,
   getTokenStatusColor,
+  setActivePuterAccount,
   type PuterAccount,
   type PuterAccountInfo,
 } from '@/services/puterAccounts';
@@ -74,6 +76,7 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [newAccountName, setNewAccountName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const codex = getStrategyCodex();
 
   useEffect(() => {
@@ -83,6 +86,7 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
 
   const loadPuterAccounts = async () => {
     try {
+      setLoading(true);
       const accounts = await getPuterAccounts();
       setPuterAccounts(accounts);
 
@@ -98,8 +102,31 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
     }
   };
 
+  const handleRefreshAccount = async () => {
+    try {
+      setRefreshing(true);
+      const active = puterAccounts.find(a => a.is_active);
+      if (active) {
+        const info = await refreshAccountInfo(active.id);
+        if (info) {
+          setAccountInfo(info);
+          // Reload accounts to get updated data
+          await loadPuterAccounts();
+        }
+      }
+    } catch (err) {
+      console.error('Error refreshing account:', err);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const handleAddAccount = async () => {
-    if (!newAccountName.trim()) return;
+    if (!newAccountName.trim()) {
+      // Generate a default name if empty
+      const timestamp = new Date().toLocaleString('fr-FR');
+      setNewAccountName(`Compte ${timestamp}`);
+    }
 
     try {
       const isPuter = await isPuterSignedIn();
@@ -111,13 +138,23 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
         }
       }
 
-      await addPuterAccount(newAccountName);
+      await addPuterAccount(newAccountName || `Compte ${new Date().toLocaleString('fr-FR')}`);
       setNewAccountName('');
       setShowAddAccount(false);
       await loadPuterAccounts();
     } catch (err) {
       console.error('Error adding account:', err);
       alert('Erreur lors de l\'ajout du compte');
+    }
+  };
+
+  const handleSwitchAccount = async (accountId: string) => {
+    try {
+      await setActivePuterAccount(accountId);
+      await loadPuterAccounts();
+    } catch (err) {
+      console.error('Error switching account:', err);
+      alert('Erreur lors du changement de compte');
     }
   };
 
@@ -167,7 +204,7 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
     updateSettings(newSettings);
   };
 
-  const toggleSection = (section: 'ai' | 'codex' | 'prompts' | 'variables') => {
+  const toggleSection = (section: 'ai' | 'codex' | 'prompts' | 'variables' | 'accounts') => {
     setActiveSection(activeSection === section ? null : section);
   };
 
@@ -184,7 +221,7 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
           >
             <h3 className="font-semibold flex items-center gap-2">
               <Zap className="w-4 h-4 text-primary" />
-              Comptes Puter
+              Comptes Puter Multi-Comptes
             </h3>
             <ChevronRight className={`w-5 h-5 transition-transform ${activeSection === 'accounts' ? 'rotate-90' : ''}`} />
           </div>
@@ -194,57 +231,128 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
               {loading ? (
                 <p className="text-sm text-muted-foreground text-center py-4">Chargement...</p>
               ) : puterAccounts.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">Aucun compte ajouté</p>
+                <div className="text-center py-6">
+                  <p className="text-sm text-muted-foreground mb-4">Aucun compte Puter configuré</p>
+                  <Button onClick={() => setShowAddAccount(true)} className="gap-2">
+                    <Plus className="w-4 h-4" />
+                    Ajouter votre premier compte
+                  </Button>
+                </div>
               ) : (
                 <>
                   {accountInfo && (
-                    <div className="p-3 rounded-lg bg-primary/5 border border-primary/20">
-                      <h4 className="font-semibold text-sm mb-2">Compte actif</h4>
-                      <div className="space-y-1.5 text-sm">
-                        <div className="flex justify-between">
+                    <div className="p-4 rounded-lg bg-gradient-to-br from-primary/10 to-primary/5 border-2 border-primary/30">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="font-semibold text-sm flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                          Compte actif
+                        </h4>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleRefreshAccount}
+                          disabled={refreshing}
+                          className="gap-1 h-7 px-2"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
+                          <span className="text-xs">Actualiser</span>
+                        </Button>
+                      </div>
+                      
+                      <div className="space-y-2 text-sm">
+                        <div className="flex justify-between items-center">
                           <span className="text-muted-foreground">Utilisateur:</span>
-                          <span className="font-semibold">{accountInfo.username}</span>
+                          <span className="font-semibold text-primary">{accountInfo.username}</span>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Tokens utilisés:</span>
-                          <span>{formatTokens(accountInfo.tokens_used)}</span>
+                        
+                        {accountInfo.email && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-muted-foreground">Email:</span>
+                            <span className="font-medium text-xs">{accountInfo.email}</span>
+                          </div>
+                        )}
+                        
+                        {accountInfo.user_id && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-muted-foreground">User ID:</span>
+                            <span className="font-mono text-xs opacity-70">{accountInfo.user_id.slice(0, 12)}...</span>
+                          </div>
+                        )}
+                        
+                        {accountInfo.subscription && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-muted-foreground">Abonnement:</span>
+                            <span className="font-medium capitalize">{accountInfo.subscription}</span>
+                          </div>
+                        )}
+
+                        <div className="pt-2 mt-2 border-t border-primary/20">
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-muted-foreground">Tokens utilisés:</span>
+                            <span className="font-semibold">{formatTokens(accountInfo.tokens_used)}</span>
+                          </div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-muted-foreground">Restants:</span>
+                            <span className={`font-semibold ${getTokenStatusColor(accountInfo.tokens_percentage)}`}>
+                              {formatTokens(accountInfo.tokens_remaining)}
+                            </span>
+                          </div>
+                          
+                          <div className="w-full bg-secondary/50 rounded-full h-2.5 overflow-hidden">
+                            <div
+                              className={`h-full transition-all ${
+                                accountInfo.tokens_percentage < 50
+                                  ? 'bg-success'
+                                  : accountInfo.tokens_percentage < 80
+                                  ? 'bg-warning'
+                                  : 'bg-destructive'
+                              }`}
+                              style={{ width: `${Math.min(100, accountInfo.tokens_percentage)}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-xs mt-1.5">
+                            <span className="text-muted-foreground">Utilisation:</span>
+                            <span className="font-medium">{accountInfo.tokens_percentage.toFixed(1)}%</span>
+                          </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Restants:</span>
-                          <span className={`font-semibold ${getTokenStatusColor(accountInfo.tokens_percentage)}`}>
-                            {formatTokens(accountInfo.tokens_remaining)}
-                          </span>
-                        </div>
-                        <div className="w-full bg-secondary/50 rounded-full h-2 overflow-hidden mt-2">
-                          <div
-                            className={`h-full transition-all ${
-                              accountInfo.tokens_percentage < 50
-                                ? 'bg-success'
-                                : accountInfo.tokens_percentage < 80
-                                ? 'bg-warning'
-                                : 'bg-destructive'
-                            }`}
-                            style={{ width: `${Math.min(100, accountInfo.tokens_percentage)}%` }}
-                          />
-                        </div>
-                        <div className="flex justify-between text-xs mt-1">
-                          <span className="text-muted-foreground">Utilisation:</span>
-                          <span>{accountInfo.tokens_percentage.toFixed(1)}%</span>
+
+                        {accountInfo.quota && (
+                          <div className="pt-2 mt-2 border-t border-primary/20">
+                            <p className="text-xs font-semibold mb-1.5 text-muted-foreground">Quota API Puter</p>
+                            {accountInfo.quota.storage_used !== undefined && (
+                              <div className="flex justify-between items-center text-xs">
+                                <span className="text-muted-foreground">Stockage:</span>
+                                <span>{formatTokens(accountInfo.quota.storage_used || 0)} / {formatTokens(accountInfo.quota.storage_limit || 0)}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="pt-2 text-xs text-muted-foreground">
+                          Ajouté le {new Date(accountInfo.created_at).toLocaleDateString('fr-FR')}
                         </div>
                       </div>
                     </div>
                   )}
 
                   <div className="space-y-2">
-                    <h4 className="font-semibold text-sm">Tous les comptes ({puterAccounts.length})</h4>
+                    <h4 className="font-semibold text-sm flex items-center justify-between">
+                      <span>Tous les comptes ({puterAccounts.length})</span>
+                      {puterAccounts.length > 1 && (
+                        <span className="text-xs text-muted-foreground font-normal">
+                          Cliquez pour changer de compte
+                        </span>
+                      )}
+                    </h4>
                     {puterAccounts.map(account => (
                       <div
                         key={account.id}
-                        className={`p-3 rounded-lg border ${
+                        className={`p-3 rounded-lg border transition-all cursor-pointer ${
                           account.is_active
-                            ? 'bg-primary/10 border-primary/30'
-                            : 'bg-muted/50 border-border/50'
+                            ? 'bg-primary/10 border-primary/30 ring-2 ring-primary/20'
+                            : 'bg-muted/50 border-border/50 hover:border-primary/20 hover:bg-muted/70'
                         }`}
+                        onClick={() => !account.is_active && handleSwitchAccount(account.id)}
                       >
                         <div className="flex items-center justify-between mb-1">
                           <div className="flex items-center gap-2">
@@ -258,14 +366,24 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleDeleteAccount(account.id)}
-                            className="text-destructive hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAccount(account.id);
+                            }}
+                            className="text-destructive hover:text-destructive h-7 w-7 p-0"
                           >
                             <Trash2 className="w-4 h-4" />
                           </Button>
                         </div>
-                        <div className="text-xs text-muted-foreground">
-                          {formatTokens(account.tokens_limit - account.tokens_used)} tokens restants
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-muted-foreground">
+                            {formatTokens(account.tokens_limit - account.tokens_used)} tokens restants
+                          </span>
+                          {account.last_token_check && (
+                            <span className="text-muted-foreground opacity-70">
+                              {new Date(account.last_token_check).toLocaleDateString('fr-FR')}
+                            </span>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -276,9 +394,10 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
               <Button
                 onClick={() => setShowAddAccount(true)}
                 className="w-full gap-2"
+                variant={puterAccounts.length === 0 ? "default" : "outline"}
               >
                 <Plus className="w-4 h-4" />
-                Ajouter un compte
+                Ajouter un compte Puter
               </Button>
             </div>
           )}
@@ -311,12 +430,12 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
             <DialogHeader>
               <DialogTitle>Ajouter un compte Puter</DialogTitle>
               <DialogDescription>
-                Entrez le nom de votre compte Puter (optionnel, sera généré si vide)
+                Connectez-vous à Puter pour ajouter un nouveau compte. Le nom est optionnel et sera généré automatiquement si laissé vide.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
               <Input
-                placeholder="Ex: Compte principal, Compte test..."
+                placeholder="Ex: Compte principal, Compte test... (optionnel)"
                 value={newAccountName}
                 onChange={(e) => setNewAccountName(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && handleAddAccount()}
@@ -331,7 +450,6 @@ const SettingsSection = ({ puterUser, onDisconnect }: SettingsSectionProps) => {
                 </Button>
                 <Button
                   onClick={handleAddAccount}
-                  disabled={!newAccountName.trim()}
                   className="flex-1"
                 >
                   Ajouter
