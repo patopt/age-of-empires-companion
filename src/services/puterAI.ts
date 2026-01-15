@@ -168,30 +168,30 @@ VARIABLES DISPONIBLES:
   },
   ocr: {
     name: 'Analyse OCR/Image',
-    template: `Tu es l'Oracle Stratégique, expert en analyse d'images du jeu Age of Empires Mobile.
+    template: `Tu es un expert OCR spécialisé dans Age of Empires Mobile.
 
-TÂCHE SPÉCIALE - OCR/ANALYSE D'IMAGE:
-Tu dois analyser la capture d'écran fournie et extraire TOUTES les informations visibles:
-- Pour un héros: nom, niveau, étoiles, rôle, spécialité, stats, équipement visible, talents
-- Pour l'équipement: nom, rareté (couleur), niveau, étoiles, stats, gemmes
-- Pour un bâtiment: nom, niveau, coûts upgrade, temps, production si applicable
-- Pour l'inventaire: liste COMPLÈTE de tous les items visibles
+RÈGLE ABSOLUE: Tu DOIS répondre UNIQUEMENT en JSON valide. Rien d'autre.
 
-IMPORTANT: Si tu détectes que l'image ne montre pas TOUS les éléments (ex: inventaire tronqué), 
-indique "complete": false et liste les "missingElements".
+TÂCHE: Extrais TOUTES les informations visibles de l'image.
 
-VARIABLES DISPONIBLES:
-- {{STRATEGY_KNOWLEDGE}} : Document stratégique pour validation
-- {{USER_CONTEXT}} : Données actuelles du joueur
-
-RÉPONDS EN JSON STRUCTURÉ avec ce format exact:
+FORMAT DE RÉPONSE (JSON uniquement):
 {
   "type": "hero|equipment|building|profile|inventory",
   "confidence": 0.0-1.0,
-  "data": { /* données extraites selon le type */ },
-  "complete": true|false,
-  "missingElements": ["liste des éléments non visibles si incomplet"]
-}`,
+  "data": {
+    // Pour hero: name, level, stars, role, specialty, rarity, might, strategy, siege, armor, power
+    // Pour equipment: name, slot, rarity, level, stars, mainStat, mainStatValue
+    // Pour building: name, level, maxLevel, category
+    // Pour profile: name, level, power, civilization, resources
+  }
+}
+
+EXEMPLES VALIDES:
+Hero: {"type":"hero","confidence":0.95,"data":{"name":"Attila","level":30,"stars":4,"role":"warrior","specialty":"cavalry","might":450,"strategy":200}}
+Equipment: {"type":"equipment","confidence":0.9,"data":{"name":"Épée Divine","slot":"weapon","rarity":"gold","level":50}}
+Profile: {"type":"profile","confidence":0.95,"data":{"name":"Player123","level":45,"power":1250000,"civilization":"France"}}
+
+NE RÉPONDS QU'AVEC LE JSON. PAS DE TEXTE AVANT OU APRÈS.`,
   },
   hero: {
     name: 'Conseiller Héros',
@@ -388,56 +388,251 @@ export async function chatWithMultipleModels(
     .map(r => r.value);
 }
 
-// OCR Analysis function
+// Helper to prepare image for AI
+function prepareImageForAI(imageBase64: string): string {
+  if (imageBase64.startsWith('data:image')) {
+    return imageBase64;
+  }
+  if (!imageBase64.includes('data:')) {
+    return `data:image/png;base64,${imageBase64}`;
+  }
+  return imageBase64;
+}
+
+// Build optimized OCR prompt
+function buildOCRPrompt(expectedType: string): string {
+  const baseInstruction = `Tu es un expert OCR pour Age of Empires Mobile.
+
+CRITIQUE: Tu DOIS répondre UNIQUEMENT avec du JSON valide. Pas de texte avant ou après.
+
+`;
+
+  const typeInstructions: Record<string, string> = {
+    hero: `Analyse ce HÉROS et retourne ce JSON:
+{
+  "type": "hero",
+  "confidence": 0.95,
+  "data": {
+    "name": "Nom exact du héros",
+    "level": nombre,
+    "stars": nombre,
+    "role": "marshal|warrior|tactician",
+    "specialty": "cavalry|archer|swordsman|pikeman",
+    "rarity": "legendary|epic|rare|common",
+    "might": nombre,
+    "strategy": nombre,
+    "siege": nombre,
+    "armor": nombre,
+    "power": nombre_total
+  }
+}`,
+
+    equipment: `Analyse cet ÉQUIPEMENT et retourne ce JSON:
+{
+  "type": "equipment",
+  "confidence": 0.95,
+  "data": {
+    "name": "Nom équipement",
+    "slot": "weapon|helmet|armor|boots|accessory|ring",
+    "rarity": "gold|purple|blue|green",
+    "level": nombre,
+    "stars": nombre,
+    "mainStat": "stat principale",
+    "mainStatValue": nombre
+  }
+}`,
+
+    building: `Analyse ce BÂTIMENT et retourne ce JSON:
+{
+  "type": "building",
+  "confidence": 0.95,
+  "data": {
+    "name": "Nom bâtiment",
+    "level": nombre,
+    "maxLevel": nombre,
+    "category": "military|economic|research|defensive|production"
+  }
+}`,
+
+    profile: `Analyse ce PROFIL et retourne ce JSON:
+{
+  "type": "profile",
+  "confidence": 0.95,
+  "data": {
+    "name": "Nom joueur",
+    "level": nombre,
+    "power": nombre,
+    "civilization": "civilisation",
+    "resources": {
+      "wood": nombre,
+      "food": nombre,
+      "stone": nombre,
+      "gold": nombre
+    }
+  }
+}`,
+
+    auto: `Détermine le type (hero, equipment, building, profile, inventory) puis extrais les données en JSON.
+
+Format:
+{
+  "type": "type_détecté",
+  "confidence": 0.0-1.0,
+  "data": { /* selon type */ }
+}`
+  };
+
+  return baseInstruction + (typeInstructions[expectedType] || typeInstructions.auto) + '\n\nJSON UNIQUEMENT:';
+}
+
+// Parse OCR response with multiple strategies
+function parseOCRResponse(response: string, expectedType: string): OCRResult {
+  console.log('Parsing OCR response...');
+
+  // Strategy 1: Direct JSON
+  try {
+    const parsed = JSON.parse(response);
+    if (parsed.type && parsed.data) {
+      console.log('✓ Direct JSON parse');
+      return {
+        success: true,
+        type: parsed.type,
+        data: parsed.data,
+        confidence: parsed.confidence || 0.85,
+        rawText: response,
+        needsMoreScreenshots: parsed.complete === false,
+        missingElements: parsed.missingElements,
+      };
+    }
+  } catch (e) {
+    console.log('✗ Direct JSON failed');
+  }
+
+  // Strategy 2: Code block JSON
+  const codeBlockMatch = response.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  if (codeBlockMatch) {
+    try {
+      const parsed = JSON.parse(codeBlockMatch[1]);
+      console.log('✓ Code block JSON parse');
+      return {
+        success: true,
+        type: parsed.type || expectedType,
+        data: parsed.data || parsed,
+        confidence: parsed.confidence || 0.8,
+        rawText: response,
+        needsMoreScreenshots: parsed.complete === false,
+        missingElements: parsed.missingElements,
+      };
+    } catch (e) {
+      console.log('✗ Code block JSON failed');
+    }
+  }
+
+  // Strategy 3: Find any JSON
+  const jsonMatch = response.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      console.log('✓ Regex JSON parse');
+      return {
+        success: true,
+        type: parsed.type || expectedType,
+        data: parsed.data || parsed,
+        confidence: parsed.confidence || 0.75,
+        rawText: response,
+        needsMoreScreenshots: parsed.complete === false,
+        missingElements: parsed.missingElements,
+      };
+    } catch (e) {
+      console.log('✗ Regex JSON failed');
+    }
+  }
+
+  // Strategy 4: Text extraction
+  console.log('Attempting text extraction...');
+  const extractedData = extractDataFromText(response, expectedType);
+  if (extractedData && Object.keys(extractedData).length > 0) {
+    console.log('✓ Text extraction successful');
+    return {
+      success: true,
+      type: expectedType === 'auto' ? 'unknown' : expectedType,
+      data: extractedData,
+      confidence: 0.6,
+      rawText: response,
+    };
+  }
+
+  // Fallback
+  console.log('⚠ All strategies failed');
+  return {
+    success: true,
+    type: expectedType === 'auto' ? 'unknown' : expectedType,
+    data: { rawResponse: response },
+    confidence: 0.5,
+    rawText: response,
+  };
+}
+
+// Extract data from text
+function extractDataFromText(text: string, expectedType: string): any | null {
+  const data: any = {};
+
+  const nameMatch = text.match(/(?:nom|name)[:\s]+([^\n,]+)/i);
+  if (nameMatch) data.name = nameMatch[1].trim();
+
+  const levelMatch = text.match(/(?:niveau|level|niv|lv)[:\s]+(\d+)/i);
+  if (levelMatch) data.level = parseInt(levelMatch[1]);
+
+  const starsMatch = text.match(/(?:étoiles?|stars?)[:\s]+(\d+)/i);
+  if (starsMatch) data.stars = parseInt(starsMatch[1]);
+
+  const powerMatch = text.match(/(?:puissance|power)[:\s]+([\d,]+)/i);
+  if (powerMatch) data.power = parseInt(powerMatch[1].replace(/,/g, ''));
+
+  if (expectedType === 'hero') {
+    const mightMatch = text.match(/(?:force|might)[:\s]+(\d+)/i);
+    if (mightMatch) data.might = parseInt(mightMatch[1]);
+
+    const strategyMatch = text.match(/(?:stratégie|strategy)[:\s]+(\d+)/i);
+    if (strategyMatch) data.strategy = parseInt(strategyMatch[1]);
+
+    const roleMatch = text.match(/(?:rôle|role)[:\s]+(marshal|warrior|tactician)/i);
+    if (roleMatch) data.role = roleMatch[1].toLowerCase();
+  }
+
+  return Object.keys(data).length > 0 ? data : null;
+}
+
+// OCR Analysis function - IMPROVED
 export async function analyzeScreenshot(
   imageBase64: string,
   expectedType: 'hero' | 'equipment' | 'building' | 'profile' | 'inventory' | 'auto'
 ): Promise<OCRResult> {
-  const prompt = expectedType === 'auto'
-    ? `Analyse cette capture d'écran d'Age of Empires Mobile. Détermine le type de contenu (héros, équipement, bâtiment, profil, inventaire) et extrais TOUTES les informations visibles en détail.`
-    : `Analyse cette capture d'écran d'Age of Empires Mobile contenant un ${expectedType}. Extrais TOUTES les informations visibles en détail.`;
+  console.log('=== OCR START ===');
+  console.log('Type:', expectedType);
+  console.log('Image length:', imageBase64.length);
 
-  console.log('Analyzing screenshot:', { expectedType, imageLength: imageBase64.length });
+  const preparedImage = prepareImageForAI(imageBase64);
+  const prompt = buildOCRPrompt(expectedType);
 
   try {
-    const response = await chatWithAI(prompt, imageBase64, 'ocr');
-    console.log('OCR Response:', response);
-    
-    // Try to parse JSON from response
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          success: true,
-          type: parsed.type || expectedType,
-          data: parsed.data || parsed,
-          confidence: parsed.confidence || 0.8,
-          rawText: response,
-          needsMoreScreenshots: parsed.complete === false,
-          missingElements: parsed.missingElements,
-        };
-      } catch (parseError) {
-        console.error('JSON parse error:', parseError);
-      }
-    }
-    
-    // If no JSON, return raw text with basic analysis
-    return {
-      success: true,
-      type: expectedType === 'auto' ? 'unknown' : expectedType,
-      data: { rawResponse: response },
-      confidence: 0.6,
-      rawText: response,
-    };
+    const response = await chatWithAI(prompt, preparedImage, 'ocr', 'gemini-2.0-flash');
+    console.log('=== OCR RESPONSE ===');
+    console.log('Length:', response.length);
+    console.log('Preview:', response.substring(0, 200));
+
+    const parsed = parseOCRResponse(response, expectedType);
+    console.log('=== PARSED ===', parsed);
+
+    return parsed;
   } catch (error) {
-    console.error('OCR error:', error);
+    console.error('=== OCR ERROR ===', error);
     return {
       success: false,
       type: 'unknown',
       data: null,
       confidence: 0,
-      rawText: error instanceof Error ? error.message : 'Erreur d\'analyse',
+      rawText: error instanceof Error ? error.message : 'Erreur analyse',
     };
   }
 }
